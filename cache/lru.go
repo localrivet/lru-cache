@@ -30,7 +30,7 @@ func New(capacity int) LRUCache {
 //Get: returns the cache value stored for the key, also moves the list pointer to front of the list
 func (cache *LRUCache) Get(key int) int {
 	if node, ok := cache.elements[key]; ok {
-		value := node.Value.(*list.Element).Value.(KeyPair).value
+		value := node.Value.(KeyPair).value
 		cache.list.MoveToFront(node)
 		return value
 	}
@@ -42,29 +42,25 @@ func (cache *LRUCache) Get(key int) int {
 func (cache *LRUCache) Put(key int, value int) {
 	if node, ok := cache.elements[key]; ok {
 		cache.list.MoveToFront(node)
-		node.Value.(*list.Element).Value = KeyPair{key: key, value: value}
+		node.Value = KeyPair{key: key, value: value}
 	} else {
 		if cache.list.Len() == cache.capacity {
-			idx := cache.list.Back().Value.(*list.Element).Value.(KeyPair).key
+			idx := cache.list.Back().Value.(KeyPair).key
 			delete(cache.elements, idx)
 			cache.list.Remove(cache.list.Back())
 		}
-	}
-
-	node := &list.Element{
-		Value: KeyPair{
+		node := KeyPair{
 			key:   key,
 			value: value,
-		},
+		}
+		pointer := cache.list.PushFront(node)
+		cache.elements[key] = pointer
 	}
-
-	pointer := cache.list.PushFront(node)
-	cache.elements[key] = pointer
 }
 
 func (cache *LRUCache) Print() {
 	for key, value := range cache.elements {
-		fmt.Printf("Key:%d,Value:%+v\n", key, value.Value.(*list.Element).Value.(KeyPair).value)
+		fmt.Printf("Key:%d,Value:%+v\n", key, value.Value.(KeyPair).value)
 	}
 }
 
@@ -78,7 +74,7 @@ func (cache *LRUCache) Keys() []interface{} {
 }
 
 func (cache *LRUCache) RecentlyUsed() interface{} {
-	return cache.list.Front().Value.(*list.Element).Value.(KeyPair).value
+	return cache.list.Front().Value.(KeyPair).value
 }
 
 //Remove: removes the entry for the respective key
