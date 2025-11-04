@@ -448,7 +448,7 @@ func TestString(t *testing.T) {
 	cache.Put(2, 20)
 
 	str := cache.String()
-	expected := "LRUCache{capacity: 10, size: 2}"
+	expected := "LRUCache{sharded: false, capacity: 10, size: 2}"
 	if str != expected {
 		t.Errorf("Expected '%s', got '%s'", expected, str)
 	}

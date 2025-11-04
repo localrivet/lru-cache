@@ -4,154 +4,166 @@ import (
 	"fmt"
 	"log"
 	lru "lru-cache/cache"
+	"time"
 )
 
 func main() {
-	fmt.Println("=== Production-Ready LRU Cache Demo ===\n")
+	fmt.Println("=== LRU Cache - Production Ready with Insane Performance ===\n")
 
-	// Create a new cache with capacity 5
-	cache, err := lru.New[string, int](5)
+	// 1. Standard mode (non-sharded)
+	fmt.Println("1. Standard Mode (single lock):")
+	standardCache, err := lru.New[string, int](5)
 	if err != nil {
 		log.Fatal(err)
 	}
-	fmt.Printf("Created cache with capacity: %d\n\n", cache.Cap())
+	standardCache.Put("apple", 1)
+	standardCache.Put("banana", 2)
+	fmt.Printf("   %s\n\n", standardCache.String())
 
-	// Basic operations: Put and Get
-	fmt.Println("1. Basic Put and Get operations:")
-	cache.Put("apple", 1)
-	cache.Put("banana", 2)
-	cache.Put("cherry", 3)
-	cache.Put("date", 4)
-	cache.Put("elderberry", 5)
-
-	if val, ok := cache.Get("apple"); ok {
-		fmt.Printf("   Get('apple') = %d\n", val)
+	// 2. High-throughput mode (sharded for ETL)
+	fmt.Println("2. High-Throughput Mode (64 shards for ETL):")
+	etlCache, err := lru.NewWithOptions[string, int](
+		100000,
+		lru.HighThroughputOptions(), // 64 shards + stats
+	)
+	if err != nil {
+		log.Fatal(err)
 	}
-	if val, ok := cache.Get("cherry"); ok {
-		fmt.Printf("   Get('cherry') = %d\n", val)
+	etlCache.Put("key1", 100)
+	etlCache.Put("key2", 200)
+	fmt.Printf("   %s\n\n", etlCache.String())
+
+	// 3. Demonstrate performance with concurrent access
+	fmt.Println("3. Performance Demo (10,000 operations):")
+
+	cache, _ := lru.NewWithOptions[int, int](
+		10000,
+		lru.Options{Shards: 64, TrackStats: true},
+	)
+
+	start := time.Now()
+	for i := 0; i < 10000; i++ {
+		cache.Put(i, i*10)
 	}
-	fmt.Printf("   Cache size: %d/%d\n\n", cache.Len(), cache.Cap())
-
-	// Demonstrate eviction
-	fmt.Println("2. LRU Eviction (adding 6th item to capacity-5 cache):")
-	evicted, key, val := cache.Put("fig", 6)
-	if evicted {
-		fmt.Printf("   Evicted: '%s' = %d\n", key, val)
+	for i := 0; i < 10000; i++ {
+		cache.Get(i)
 	}
-	fmt.Printf("   Cache size: %d/%d\n\n", cache.Len(), cache.Cap())
+	elapsed := time.Since(start)
 
-	// Show all keys
-	fmt.Println("3. Current keys in cache:")
-	keys := cache.Keys()
-	fmt.Printf("   Keys: %v\n\n", keys)
+	stats := cache.Stats()
+	fmt.Printf("   Time: %v\n", elapsed)
+	fmt.Printf("   Throughput: %.0f ops/sec\n", 20000/elapsed.Seconds())
+	fmt.Printf("   Hit rate: %.2f%%\n", stats.HitRate*100)
+	fmt.Printf("   Cache: %d/%d items\n\n", stats.Size, stats.Capacity)
 
-	// Peek without updating recency
-	fmt.Println("4. Peek (doesn't update recency):")
-	if val, ok := cache.Peek("banana"); ok {
-		fmt.Printf("   Peek('banana') = %d\n", val)
+	// 4. GetOrCompute pattern (perfect for ETL lookups)
+	fmt.Println("4. GetOrCompute (ETL lookup pattern):")
+
+	lookupCache, _ := lru.NewWithOptions[string, string](
+		1000,
+		lru.Options{Shards: 32, TrackStats: true},
+	)
+
+	// First call - computes
+	user1, cached := lookupCache.GetOrCompute("user_123", func() string {
+		fmt.Println("   → Cache miss, fetching from database...")
+		return "John Doe"
+	})
+	fmt.Printf("   Result: %s (cached: %v)\n", user1, cached)
+
+	// Second call - from cache
+	user2, cached := lookupCache.GetOrCompute("user_123", func() string {
+		fmt.Println("   → This should not print!")
+		return "Never called"
+	})
+	fmt.Printf("   Result: %s (cached: %v)\n\n", user2, cached)
+
+	// 5. Batch operations (ETL bulk processing)
+	fmt.Println("5. Batch Operations (bulk ETL processing):")
+
+	batchCache, _ := lru.NewWithOptions[int, string](
+		10000,
+		lru.HighThroughputOptions(),
+	)
+
+	// Batch Put
+	items := map[int]string{
+		1: "one",
+		2: "two",
+		3: "three",
 	}
+	batchCache.BatchPut(items)
 
-	// Contains check
-	fmt.Println("\n5. Contains check:")
-	fmt.Printf("   Contains('banana'): %v\n", cache.Contains("banana"))
-	fmt.Printf("   Contains('apple'): %v (was evicted)\n\n", cache.Contains("apple"))
+	// Batch Get
+	keys := []int{1, 2, 3, 999}
+	results := batchCache.BatchGet(keys)
+	fmt.Printf("   Batch Get results: %v\n", results)
+	fmt.Printf("   (key 999 not found, as expected)\n\n")
 
-	// Oldest and Newest
-	fmt.Println("6. Oldest and Newest items:")
-	if key, val, err := cache.Oldest(); err == nil {
-		fmt.Printf("   Oldest: '%s' = %d\n", key, val)
-	}
-	if key, val, err := cache.Newest(); err == nil {
-		fmt.Printf("   Newest: '%s' = %d\n\n", key, val)
-	}
+	// 6. Show different shard configurations
+	fmt.Println("6. Shard Configuration Options:")
 
-	// Update existing key
-	fmt.Println("7. Update existing key:")
-	cache.Put("banana", 22)
-	if val, ok := cache.Get("banana"); ok {
-		fmt.Printf("   Updated 'banana' to %d\n\n", val)
-	}
-
-	// Remove operation
-	fmt.Println("8. Remove operation:")
-	if val, ok := cache.Remove("cherry"); ok {
-		fmt.Printf("   Removed 'cherry' = %d\n", val)
-	}
-	fmt.Printf("   Cache size: %d/%d\n\n", cache.Len(), cache.Cap())
-
-	// RemoveOldest
-	fmt.Println("9. RemoveOldest:")
-	if key, val, err := cache.RemoveOldest(); err == nil {
-		fmt.Printf("   Removed oldest: '%s' = %d\n", key, val)
-	}
-	fmt.Printf("   Cache size: %d/%d\n\n", cache.Len(), cache.Cap())
-
-	// Resize cache
-	fmt.Println("10. Resize cache:")
-	fmt.Printf("   Before resize: capacity=%d, size=%d\n", cache.Cap(), cache.Len())
-	if err := cache.Resize(3); err == nil {
-		fmt.Printf("   After resize: capacity=%d, size=%d\n\n", cache.Cap(), cache.Len())
-	}
-
-	// String representation
-	fmt.Println("11. Cache string representation:")
-	fmt.Printf("   %s\n\n", cache.String())
-
-	// Clear cache
-	fmt.Println("12. Clear cache:")
-	cache.Clear()
-	fmt.Printf("   After clear: size=%d\n\n", cache.Len())
-
-	// Demonstrate with different types
-	fmt.Println("=== Different Type Examples ===\n")
-
-	// Integer keys and values
-	intCache, _ := lru.New[int, int](3)
-	intCache.Put(1, 100)
-	intCache.Put(2, 200)
-	intCache.Put(3, 300)
-	fmt.Println("Integer cache:")
-	fmt.Printf("   Get(2) = %v\n\n", getOrDefault(intCache.Get(2)))
-
-	// String keys, struct values
-	type User struct {
-		Name  string
-		Email string
+	configs := []struct {
+		name   string
+		shards int
+	}{
+		{"No sharding (standard)", 0},
+		{"Light sharding", 16},
+		{"Medium sharding", 32},
+		{"Heavy sharding (ETL)", 64},
+		{"Maximum throughput", 128},
 	}
 
-	userCache, _ := lru.New[string, User](3)
-	userCache.Put("user1", User{"Alice", "alice@example.com"})
-	userCache.Put("user2", User{"Bob", "bob@example.com"})
-
-	fmt.Println("User cache:")
-	if user, ok := userCache.Get("user1"); ok {
-		fmt.Printf("   Get('user1') = {Name: %s, Email: %s}\n\n", user.Name, user.Email)
+	for _, cfg := range configs {
+		var c *lru.LRUCache[int, int]
+		if cfg.shards == 0 {
+			c, _ = lru.New[int, int](1000)
+		} else {
+			c, _ = lru.NewWithOptions[int, int](1000, lru.Options{Shards: cfg.shards})
+		}
+		c.Put(1, 10)
+		fmt.Printf("   %-30s: %s\n", cfg.name, c.String())
 	}
 
-	// Error handling example
-	fmt.Println("=== Error Handling ===\n")
+	// 7. Real-world ETL example
+	fmt.Println("\n7. Real-World ETL Example (Deduplication):")
 
-	// Invalid capacity
-	if _, err := lru.New[string, int](0); err != nil {
-		fmt.Printf("Invalid capacity error: %v\n", err)
+	dedupCache, _ := lru.NewWithOptions[string, bool](
+		100000,
+		lru.Options{Shards: 64, TrackStats: true},
+	)
+
+	// Simulate processing records
+	records := []string{
+		"record_1", "record_2", "record_3",
+		"record_1", // duplicate
+		"record_4",
+		"record_2", // duplicate
 	}
 
-	// Empty cache operations
-	emptyCache, _ := lru.New[string, int](5)
-	if _, _, err := emptyCache.Oldest(); err != nil {
-		fmt.Printf("Empty cache error: %v\n", err)
+	processed := 0
+	duplicates := 0
+
+	for _, recordID := range records {
+		if _, seen := dedupCache.Get(recordID); seen {
+			fmt.Printf("   ✗ Duplicate: %s\n", recordID)
+			duplicates++
+		} else {
+			fmt.Printf("   ✓ Processing: %s\n", recordID)
+			dedupCache.Put(recordID, true)
+			processed++
+		}
 	}
-	if _, _, err := emptyCache.Newest(); err != nil {
-		fmt.Printf("Empty cache error: %v\n", err)
-	}
-	if _, _, err := emptyCache.RemoveOldest(); err != nil {
-		fmt.Printf("Empty cache error: %v\n\n", err)
-	}
+
+	fmt.Printf("\n   Summary: %d processed, %d duplicates\n", processed, duplicates)
+
+	// Final stats
+	finalStats := dedupCache.Stats()
+	fmt.Printf("   Cache stats: %d items, %.2f%% hit rate\n\n",
+		finalStats.Size, finalStats.HitRate*100)
 
 	fmt.Println("=== Demo Complete ===")
-}
-
-// Helper function to handle tuple returns
-func getOrDefault[V any](val V, ok bool) V {
-	return val
+	fmt.Println("\nFor ETL workloads, use:")
+	fmt.Println("  cache, _ := lru.NewWithOptions[K, V](capacity, lru.HighThroughputOptions())")
+	fmt.Println("\nSee ETL_PERFORMANCE.md for benchmarks and detailed guide!")
 }
