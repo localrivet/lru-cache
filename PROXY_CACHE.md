@@ -1,313 +1,155 @@
-# LRU Cache for Proxies - Complete Guide
+# ProxyCache - HTTP-Aware LRU Cache
 
-## 🚀 Faster Than Traefik's Caching
-
-This LRU cache is purpose-built for L4/L7 proxies with **insane performance**.
+High-performance caching for L4/L7 proxies, API gateways, and HTTP services.
 
 ---
 
-## Traefik Comparison
+## Features
 
-### What Traefik Is
-- **Full L7 reverse proxy** and load balancer
-- Focuses on routing, service discovery, SSL termination
-- Middleware-based architecture
-- **Caching is a plugin/afterthought**
-
-### What Our Cache Is
-- **Purpose-built high-performance cache**
-- Designed specifically for proxy workloads
-- **9M+ ops/sec** base performance
-- **HTTP-aware**: TTL, size limits, eviction callbacks
-- Thread-safe, production-ready
-
-### Performance vs Traefik
-
-| Feature | Traefik | Our ProxyCache |
-|---------|---------|----------------|
-| **HTTP Response Caching** | Via plugin (~slower) | **236 ns/op** |
-| **Cache Get** | Unknown (not focus) | **187 ns/op** |
-| **Cache Put** | Unknown (not focus) | **844 ns/op** |
-| **Throughput** | ~100K-500K ops/sec (est) | **9M+ ops/sec** |
-| **TTL Support** | Depends on plugin | ✅ Built-in |
-| **Size-Based Eviction** | Depends on plugin | ✅ Built-in (bytes) |
-| **Eviction Callbacks** | No | ✅ Built-in |
-| **Sharding** | No | ✅ 16-128 shards |
-| **Stats Tracking** | Via metrics | ✅ Built-in |
-
-**Verdict**: Our cache is **10-50x faster** than typical proxy caching solutions.
+✅ **TTL/Expiration** - Automatic expiry with background cleanup
+✅ **Size-Based Eviction** - Limit by bytes, not just count
+✅ **Eviction Callbacks** - Cleanup resources on evict
+✅ **HTTP Metadata** - Cache age, expiration time, entry size
+✅ **Sharding** - 64-128 way parallelism for high concurrency
+✅ **Stats Tracking** - Hit/miss ratios, byte usage
 
 ---
 
-## Proxy Features
+## Quick Start
 
-### 1. TTL/Expiration ✅
-
-HTTP responses expire - cache handles it automatically:
+### Basic Usage
 
 ```go
 cache, _ := lru.NewProxyCache[string, []byte](lru.ProxyOptions{
     Capacity:   10000,
-    DefaultTTL: 5 * time.Minute, // Responses expire after 5min
+    MaxBytes:   500 * 1024 * 1024, // 500MB
+    DefaultTTL: 5 * time.Minute,
+    Shards:     64,
+    TrackStats: true,
 })
+defer cache.Close()
 
-// Use default TTL
+// Store with default TTL
 cache.Put("/api/users", responseBody)
 
-// Custom TTL per request
-cache.PutWithTTL("/api/hot-data", data, 30*time.Second)
-```
-
-**Automatic cleanup**: Background goroutine removes expired entries
-
-### 2. Size-Based Eviction ✅
-
-Evict by **bytes**, not just count:
-
-```go
-cache, _ := lru.NewProxyCache[string, []byte](lru.ProxyOptions{
-    Capacity: 100000,
-    MaxBytes: 500 * 1024 * 1024, // 500MB total
-    SizeFunc: func(v interface{}) int64 {
-        return int64(len(v.([]byte)))
-    },
-})
-
-// Automatically evicts LRU items when size limit reached
-cache.Put("/large-response", bigResponse) // Auto-evicts if needed
-```
-
-### 3. Eviction Callbacks ✅
-
-Cleanup connections, log evictions, update metrics:
-
-```go
-cache, _ := lru.NewProxyCache[string, *Connection](lru.ProxyOptions{
-    Capacity: 10000,
-    OnEvict: func(key, val interface{}) {
-        conn := val.(*Connection)
-        conn.Close() // Cleanup
-        metrics.IncrementEvictions()
-    },
-})
-```
-
-### 4. HTTP Cache Metadata ✅
-
-Get cache age, expiration time, size:
-
-```go
-response, info, ok := cache.GetWithInfo("/api/users")
-if ok {
-    fmt.Printf("Cached for: %v\n", info.Age)
-    fmt.Printf("Expires in: %v\n", info.ExpiresIn)
-    fmt.Printf("Size: %d bytes\n", info.Size)
-}
-```
-
----
-
-## Quick Start for Proxies
-
-### L7 HTTP Proxy - Response Caching
-
-```go
-package main
-
-import (
-    "fmt"
-    "net/http"
-    "time"
-    lru "lru-cache/cache"
-)
-
-func main() {
-    // Create HTTP response cache
-    cache, _ := lru.NewProxyCache[string, *CachedResponse](lru.ProxyOptions{
-        Capacity:        10000,
-        MaxBytes:        500 * 1024 * 1024, // 500MB
-        DefaultTTL:      5 * time.Minute,
-        Shards:          64,
-        TrackStats:      true,
-        CleanupInterval: 1 * time.Minute,
-        SizeFunc: func(v interface{}) int64 {
-            resp := v.(*CachedResponse)
-            return int64(len(resp.Body))
-        },
-        OnEvict: func(key, val interface{}) {
-            fmt.Printf("Evicted: %v\n", key)
-        },
-    })
-    defer cache.Close()
-
-    // Serve HTTP requests
-    http.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
-        cacheKey := r.URL.Path
-
-        // Check cache
-        if cached, ok := cache.Get(cacheKey); ok {
-            w.WriteHeader(cached.StatusCode)
-            w.Write(cached.Body)
-            w.Header().Set("X-Cache", "HIT")
-            return
-        }
-
-        // Cache miss - fetch from backend
-        response := fetchFromBackend(r)
-
-        // Store in cache
-        cache.Put(cacheKey, response)
-
-        w.WriteHeader(response.StatusCode)
-        w.Write(response.Body)
-        w.Header().Set("X-Cache", "MISS")
-    })
-
-    http.ListenAndServe(":8080", nil)
+// Retrieve
+if response, ok := cache.Get("/api/users"); ok {
+    // Cache hit
+    sendResponse(response)
 }
 
+// Custom TTL
+cache.PutWithTTL("/hot-data", data, 30*time.Second)
+```
+
+### HTTP Proxy Example
+
+```go
 type CachedResponse struct {
     StatusCode int
     Headers    map[string]string
     Body       []byte
 }
 
-func fetchFromBackend(r *http.Request) *CachedResponse {
-    // Your backend logic here
-    return &CachedResponse{
-        StatusCode: 200,
-        Body:       []byte("response from backend"),
-    }
-}
-```
-
-### L4 TCP Proxy - Connection Metadata
-
-```go
-type ConnectionInfo struct {
-    BackendAddr string
-    CreatedAt   time.Time
-}
-
-cache, _ := lru.NewProxyCache[string, *ConnectionInfo](lru.ProxyOptions{
-    Capacity:   50000,
-    DefaultTTL: 10 * time.Minute,
-    Shards:     64,
-    OnEvict: func(key, val interface{}) {
-        info := val.(*ConnectionInfo)
-        // Cleanup connection
-        closeConnection(info.BackendAddr)
-    },
-})
-
-// Store connection routing info
-clientAddr := "192.168.1.100:12345"
-cache.Put(clientAddr, &ConnectionInfo{
-    BackendAddr: "backend-server:8080",
-    CreatedAt:   time.Now(),
-})
-
-// Retrieve for routing
-if info, ok := cache.Get(clientAddr); ok {
-    routeToBackend(info.BackendAddr)
-}
-```
-
----
-
-## Pre-Configured Options
-
-### HTTPCacheOptions
-
-```go
-// Pre-tuned for HTTP response caching
-cache, _ := lru.NewProxyCache[string, []byte](
-    lru.HTTPCacheOptions(10000, 100*1024*1024), // 10K items, 100MB
-)
-
-// Equivalent to:
-lru.ProxyOptions{
+cache, _ := lru.NewProxyCache[string, *CachedResponse](lru.ProxyOptions{
     Capacity:        10000,
-    MaxBytes:        100 * 1024 * 1024,
+    MaxBytes:        500 * 1024 * 1024,
     DefaultTTL:      5 * time.Minute,
-    CleanupInterval: 1 * time.Minute,
     Shards:          64,
     TrackStats:      true,
-    SizeFunc:        defaultHTTPSizeFunc,
+    CleanupInterval: 1 * time.Minute,
+    SizeFunc: func(v interface{}) int64 {
+        return int64(len(v.(*CachedResponse).Body))
+    },
+    OnEvict: func(key, val interface{}) {
+        log.Printf("Evicted: %v", key)
+    },
+})
+
+// In HTTP handler
+func handleRequest(w http.ResponseWriter, r *http.Request) {
+    cacheKey := r.URL.Path
+
+    // Check cache
+    if cached, ok := cache.Get(cacheKey); ok {
+        w.WriteHeader(cached.StatusCode)
+        w.Write(cached.Body)
+        w.Header().Set("X-Cache", "HIT")
+        return
+    }
+
+    // Cache miss - fetch from backend
+    response := fetchFromBackend(r)
+    cache.Put(cacheKey, response)
+
+    w.WriteHeader(response.StatusCode)
+    w.Write(response.Body)
+    w.Header().Set("X-Cache", "MISS")
 }
 ```
 
 ---
 
-## Real-World Patterns
+## Performance
 
-### Pattern 1: API Gateway
+| Operation | ns/op | Use Case |
+|-----------|-------|----------|
+| **Put** | 844 | Store response |
+| **Get** | 187 | Retrieve cached response |
+| **HTTP Response** | 236 | Full workflow |
+| **WithTTL** | 842 | Expiring cache |
+| **WithSizeLimit** | 778 | Memory-bounded cache |
+
+**Throughput**: 5-9M ops/sec with sharding
+
+---
+
+## Common Patterns
+
+### 1. API Gateway
 
 ```go
-// API response caching with vary by headers
-type APIResponse struct {
-    Body        []byte
-    ContentType string
-    CacheKey    string
-}
-
-func generateCacheKey(r *http.Request) string {
-    // Include Vary headers in cache key
-    return fmt.Sprintf("%s:%s:%s",
-        r.URL.Path,
-        r.Header.Get("Accept"),
-        r.Header.Get("Authorization"),
-    )
-}
-
-cache, _ := lru.NewProxyCache[string, *APIResponse](lru.ProxyOptions{
+cache, _ := lru.NewProxyCache[string, []byte](lru.ProxyOptions{
     Capacity:   50000,
-    MaxBytes:   1024 * 1024 * 1024, // 1GB
+    MaxBytes:   1 * 1024 * 1024 * 1024, // 1GB
     DefaultTTL: 5 * time.Minute,
-    Shards:     128, // High concurrency
+    Shards:     128,
     TrackStats: true,
     SizeFunc: func(v interface{}) int64 {
-        return int64(len(v.(*APIResponse).Body))
+        return int64(len(v.([]byte)))
     },
 })
 
-// In handler
-cacheKey := generateCacheKey(r)
-if resp, ok := cache.Get(cacheKey); ok {
-    w.Header().Set("Content-Type", resp.ContentType)
-    w.Header().Set("X-Cache", "HIT")
-    w.Write(resp.Body)
-    return
-}
+// Generate cache key with Vary headers
+cacheKey := fmt.Sprintf("%s:%s:%s",
+    r.URL.Path,
+    r.Header.Get("Accept"),
+    r.Header.Get("Authorization"),
+)
 
-// Fetch and cache
-response := fetchAPI(r)
-cache.Put(cacheKey, response)
+if resp, ok := cache.Get(cacheKey); ok {
+    return resp
+}
 ```
 
-### Pattern 2: Rate Limiting State
+### 2. Rate Limiting
 
 ```go
-type RateLimitInfo struct {
+type RateLimit struct {
     Requests  int
     ResetTime time.Time
 }
 
-// Store rate limit state per client IP
-rateLimits, _ := lru.NewProxyCache[string, *RateLimitInfo](lru.ProxyOptions{
+rateLimits, _ := lru.NewProxyCache[string, *RateLimit](lru.ProxyOptions{
     Capacity:   100000,
-    DefaultTTL: 1 * time.Minute, // Reset every minute
+    DefaultTTL: 1 * time.Minute,
     Shards:     64,
 })
 
 func checkRateLimit(clientIP string) bool {
     info, ok := rateLimits.Get(clientIP)
     if !ok {
-        // First request
-        rateLimits.Put(clientIP, &RateLimitInfo{
-            Requests:  1,
-            ResetTime: time.Now().Add(1 * time.Minute),
-        })
+        rateLimits.Put(clientIP, &RateLimit{Requests: 1})
         return true
     }
 
@@ -321,17 +163,13 @@ func checkRateLimit(clientIP string) bool {
 }
 ```
 
-### Pattern 3: DNS Lookup Cache
+### 3. DNS Cache
 
 ```go
-// Cache DNS lookups for backend services
 dnsCache, _ := lru.NewProxyCache[string, []string](lru.ProxyOptions{
     Capacity:   10000,
     DefaultTTL: 5 * time.Minute,
     Shards:     32,
-    OnEvict: func(key, val interface{}) {
-        log.Printf("DNS cache expired: %s", key)
-    },
 })
 
 func resolveBackend(hostname string) []string {
@@ -339,207 +177,116 @@ func resolveBackend(hostname string) []string {
         return ips
     }
 
-    // Cache miss - do DNS lookup
     ips := net.LookupHost(hostname)
     dnsCache.Put(hostname, ips)
     return ips
 }
 ```
 
-### Pattern 4: Session Store
+### 4. Session Store
 
 ```go
 type Session struct {
-    UserID    string
-    Data      map[string]interface{}
-    CreatedAt time.Time
+    UserID string
+    Data   map[string]interface{}
 }
 
 sessions, _ := lru.NewProxyCache[string, *Session](lru.ProxyOptions{
     Capacity:   100000,
-    DefaultTTL: 30 * time.Minute, // Session timeout
+    DefaultTTL: 30 * time.Minute,
     Shards:     64,
-    TrackStats: true,
     OnEvict: func(key, val interface{}) {
         session := val.(*Session)
-        log.Printf("Session expired: user=%s", session.UserID)
-        // Persist to database if needed
+        log.Printf("Session expired: %s", session.UserID)
     },
 })
+```
 
-// Store session
-sessionID := generateSessionID()
-sessions.Put(sessionID, &Session{
-    UserID:    "user123",
-    Data:      map[string]interface{}{"cart": []string{}},
-    CreatedAt: time.Now(),
+### 5. L4 TCP Connection Metadata
+
+```go
+type ConnectionInfo struct {
+    BackendAddr string
+    CreatedAt   time.Time
+}
+
+connCache, _ := lru.NewProxyCache[string, *ConnectionInfo](lru.ProxyOptions{
+    Capacity:   50000,
+    DefaultTTL: 10 * time.Minute,
+    Shards:     64,
+    OnEvict: func(key, val interface{}) {
+        closeConnection(val.(*ConnectionInfo).BackendAddr)
+    },
 })
+```
 
-// Retrieve session
-if session, ok := sessions.Get(sessionID); ok {
-    // Session is valid and auto-extends TTL
-    processRequest(session)
+---
+
+## Options Reference
+
+```go
+type ProxyOptions struct {
+    // Capacity is the maximum number of items (required)
+    Capacity int
+
+    // MaxBytes is the maximum total size in bytes (0 = unlimited)
+    MaxBytes int64
+
+    // DefaultTTL is the time-to-live for cached items (0 = no expiration)
+    DefaultTTL time.Duration
+
+    // CleanupInterval is how often to check for expired items
+    // Default: 1 minute when TTL is set
+    CleanupInterval time.Duration
+
+    // OnEvict is called when an item is evicted (optional)
+    OnEvict func(key interface{}, value interface{})
+
+    // SizeFunc calculates the size of a value in bytes
+    // Required if MaxBytes > 0
+    SizeFunc func(value interface{}) int64
+
+    // Shards enables internal sharding for concurrency
+    // Options: 0 (none), 16, 32, 64, 128
+    Shards int
+
+    // TrackStats enables hit/miss statistics
+    TrackStats bool
+}
+```
+
+### Pre-configured Options
+
+```go
+// For HTTP response caching
+cache, _ := lru.NewProxyCache[string, []byte](
+    lru.HTTPCacheOptions(10000, 100*1024*1024), // 10K items, 100MB
+)
+
+// Equivalent to:
+lru.ProxyOptions{
+    Capacity:        10000,
+    MaxBytes:        100 * 1024 * 1024,
+    DefaultTTL:      5 * time.Minute,
+    CleanupInterval: 1 * time.Minute,
+    Shards:          64,
+    TrackStats:      true,
+    SizeFunc:        func(v interface{}) int64 { return 1024 },
 }
 ```
 
 ---
 
-## Performance Benchmarks
-
-### Proxy Cache Operations
-
-| Operation | Performance | Use Case |
-|-----------|-------------|----------|
-| **Put** | 844 ns/op | Store response |
-| **Get** | 187 ns/op | Retrieve cached response |
-| **HTTP Response** | 236 ns/op | Full HTTP workflow |
-| **WithTTL** | 842 ns/op | Expiring cache |
-| **WithSizeLimit** | 778 ns/op | Memory-bounded cache |
-
-### Throughput Estimates
-
-| Concurrent Workers | Ops/Second | Use Case |
-|-------------------|------------|----------|
-| 1 thread | ~1.2M | Single-core proxy |
-| 16 threads | ~5-7M | Multi-core proxy |
-| 64 threads | ~9M+ | High-concurrency gateway |
-
-**With 64 shards**: Handles millions of requests/sec
-
----
-
-## Monitoring & Observability
-
-### Track Cache Effectiveness
-
-```go
-cache, _ := lru.NewProxyCache[string, []byte](lru.ProxyOptions{
-    Capacity:   10000,
-    TrackStats: true, // MUST enable
-    Shards:     64,
-})
-
-// Periodically log stats
-go func() {
-    ticker := time.NewTicker(10 * time.Second)
-    for range ticker.C {
-        stats := cache.Stats()
-        log.Printf(`Cache Stats:
-  Hit Rate: %.2f%%
-  Hits: %d, Misses: %d
-  Size: %d/%d items
-  Memory: %d/%d bytes
-  Shards: %d`,
-            stats.HitRate*100,
-            stats.Hits,
-            stats.Misses,
-            stats.Size,
-            stats.Capacity,
-            stats.BytesUsed,
-            stats.MaxBytes,
-            stats.Shards,
-        )
-    }
-}()
-```
-
-### Prometheus Metrics
-
-```go
-import "github.com/prometheus/client_golang/prometheus"
-
-var (
-    cacheHits = prometheus.NewCounter(prometheus.CounterOpts{
-        Name: "proxy_cache_hits_total",
-    })
-    cacheMisses = prometheus.NewCounter(prometheus.CounterOpts{
-        Name: "proxy_cache_misses_total",
-    })
-)
-
-// Update metrics from cache stats
-stats := cache.Stats()
-cacheHits.Add(float64(stats.Hits))
-cacheMisses.Add(float64(stats.Misses))
-```
-
----
-
-## Production Checklist
-
-### ✅ Before Deploying
-
-1. **Size the cache appropriately**
-   ```go
-   // Calculate based on expected load
-   avgResponseSize := 10 * 1024 // 10KB
-   requestsPerSec := 10000
-   cacheDuration := 5 * time.Minute
-
-   capacity := requestsPerSec * int(cacheDuration.Seconds())
-   maxBytes := int64(capacity) * avgResponseSize
-   ```
-
-2. **Enable stats tracking**
-   ```go
-   TrackStats: true // Monitor cache effectiveness
-   ```
-
-3. **Set appropriate TTL**
-   ```go
-   // Match your HTTP Cache-Control headers
-   DefaultTTL: 5 * time.Minute
-   ```
-
-4. **Configure sharding**
-   ```go
-   // Use 2-4x your CPU core count
-   Shards: 64 // For 16-32 core machines
-   ```
-
-5. **Add eviction callbacks**
-   ```go
-   OnEvict: func(key, val interface{}) {
-       // Cleanup resources
-       // Log evictions
-       // Update metrics
-   }
-   ```
-
-6. **Set memory limits**
-   ```go
-   MaxBytes: 1 * 1024 * 1024 * 1024 // 1GB
-   ```
-
-7. **Handle cleanup**
-   ```go
-   defer cache.Close() // Stop background cleanup
-   ```
-
----
-
-## API Reference
-
-### Construction
-
-```go
-// Create proxy cache
-cache, err := lru.NewProxyCache[K, V](opts)
-
-// Pre-configured for HTTP
-cache, _ := lru.NewProxyCache[string, []byte](
-    lru.HTTPCacheOptions(capacity, maxBytes),
-)
-```
+## API Methods
 
 ### Core Operations
 
 ```go
 // Put with default TTL
-cache.Put(key, value)
+err := cache.Put(key, value)
 
 // Put with custom TTL
-cache.PutWithTTL(key, value, 30*time.Second)
+err := cache.PutWithTTL(key, value, 30*time.Second)
 
 // Get (auto-removes if expired)
 value, ok := cache.Get(key)
@@ -561,64 +308,228 @@ exists := cache.Contains(key)
 ### Management
 
 ```go
-// Clear all
+// Clear all items
 cache.Clear()
 
-// Get stats
+// Get statistics
 stats := cache.Stats()
+fmt.Printf("Hit rate: %.2f%%\n", stats.HitRate*100)
+fmt.Printf("Memory: %d/%d bytes\n", stats.BytesUsed, stats.MaxBytes)
 
-// Get size
+// Get size info
 count := cache.Len()
 bytes := cache.BytesUsed()
 
-// Cleanup
-cache.Close() // Stop background goroutine
+// Stop background cleanup
+cache.Close()
 ```
 
 ---
 
-## Comparison Summary
+## Monitoring
 
-### Traefik
-- ✅ Full proxy solution (routing, SSL, etc.)
-- ❌ Caching is secondary/plugin
-- ❌ Not optimized for cache performance
-- ❌ Limited cache features
-- **Use for**: Complete proxy infrastructure
+### Track Cache Effectiveness
 
-### Our ProxyCache
-- ✅ **10-50x faster caching**
-- ✅ Purpose-built for proxy workloads
-- ✅ HTTP-aware (TTL, size, callbacks)
-- ✅ **9M+ ops/sec throughput**
-- ✅ Production-ready features
-- **Use for**: High-performance caching layer
+```go
+cache, _ := lru.NewProxyCache[string, []byte](lru.ProxyOptions{
+    Capacity:   10000,
+    TrackStats: true, // Must enable
+    Shards:     64,
+})
 
-### Best Together
+// Periodically log stats
+go func() {
+    ticker := time.NewTicker(10 * time.Second)
+    for range ticker.C {
+        stats := cache.Stats()
+        log.Printf(`Cache Stats:
+  Hit Rate: %.2f%%
+  Hits: %d, Misses: %d
+  Size: %d/%d items
+  Memory: %d/%d bytes`,
+            stats.HitRate*100,
+            stats.Hits,
+            stats.Misses,
+            stats.Size,
+            stats.Capacity,
+            stats.BytesUsed,
+            stats.MaxBytes,
+        )
+    }
+}()
 ```
-[Traefik Proxy] → [Our ProxyCache] → [Backend Services]
-      ↓
-  Routing, SSL, etc.
-                   ↓
-                HTTP Response Caching
-                                    ↓
-                               Your Services
-```
 
-Use Traefik for **routing/infrastructure**, our cache for **performance**.
+### Prometheus Integration
+
+```go
+import "github.com/prometheus/client_golang/prometheus"
+
+var (
+    cacheHits = prometheus.NewCounter(prometheus.CounterOpts{
+        Name: "proxy_cache_hits_total",
+    })
+    cacheMisses = prometheus.NewCounter(prometheus.CounterOpts{
+        Name: "proxy_cache_misses_total",
+    })
+    cacheSize = prometheus.NewGauge(prometheus.GaugeOpts{
+        Name: "proxy_cache_size_bytes",
+    })
+)
+
+// Update from cache stats
+stats := cache.Stats()
+cacheHits.Add(float64(stats.Hits))
+cacheMisses.Add(float64(stats.Misses))
+cacheSize.Set(float64(stats.BytesUsed))
+```
 
 ---
 
-## Conclusion
+## Production Checklist
 
-**This cache is production-ready for L4/L7 proxies:**
+### 1. Size the Cache
 
-✅ **10-50x faster** than typical proxy caching
-✅ **9M+ ops/sec** throughput
-✅ **HTTP-aware** features (TTL, size, callbacks)
-✅ **Thread-safe** for concurrent use
-✅ **Memory-bounded** with automatic eviction
-✅ **Observable** with built-in stats
-✅ **Flexible** for any proxy pattern
+```go
+// Calculate based on expected load
+avgResponseSize := 10 * 1024 // 10KB
+requestsPerSec := 10000
+cacheDuration := 5 * time.Minute
 
-**Ready to drop into your proxy and make it blazing fast! 🚀**
+capacity := requestsPerSec * int(cacheDuration.Seconds())
+maxBytes := int64(capacity) * avgResponseSize
+```
+
+### 2. Configure Appropriately
+
+```go
+cache, _ := lru.NewProxyCache[string, []byte](lru.ProxyOptions{
+    Capacity:        capacity,
+    MaxBytes:        maxBytes,
+    DefaultTTL:      5 * time.Minute,
+    CleanupInterval: 1 * time.Minute,
+    Shards:          64, // 2-4x your CPU cores
+    TrackStats:      true,
+    SizeFunc: func(v interface{}) int64 {
+        return int64(len(v.([]byte)))
+    },
+    OnEvict: func(key, val interface{}) {
+        // Cleanup resources
+        metrics.IncrementEvictions()
+    },
+})
+defer cache.Close()
+```
+
+### 3. Monitor Performance
+
+- Enable `TrackStats: true`
+- Log stats periodically
+- Export to metrics system (Prometheus, Datadog, etc.)
+- Alert on low hit rates
+
+### 4. Handle Edge Cases
+
+```go
+// Check for empty cache
+if _, ok := cache.Get(key); !ok {
+    // Handle cache miss
+}
+
+// Always close to stop background goroutine
+defer cache.Close()
+
+// Handle size func errors gracefully
+SizeFunc: func(v interface{}) int64 {
+    if data, ok := v.([]byte); ok {
+        return int64(len(data))
+    }
+    return 1024 // Default estimate
+}
+```
+
+---
+
+## Use Cases
+
+✅ **L7 HTTP Reverse Proxy** - Response caching with TTL
+✅ **API Gateway** - High-throughput request caching
+✅ **L4 TCP Proxy** - Connection metadata storage
+✅ **Rate Limiting** - State tracking with expiration
+✅ **DNS Cache** - Lookup result caching
+✅ **Session Store** - TTL-based session management
+✅ **Authentication** - Token cache with expiration
+✅ **Load Balancer** - Backend health state
+
+---
+
+## Performance Tuning
+
+### Shard Count
+
+| Workload | Recommended Shards |
+|----------|-------------------|
+| Single-threaded | 0 (no sharding) |
+| Low concurrency (2-4 threads) | 16 |
+| Medium concurrency (5-10 threads) | 32 |
+| High concurrency (10-50 threads) | 64 |
+| Extreme concurrency (50+ threads) | 128 |
+
+**Rule of thumb**: Use 2-4x your CPU core count.
+
+### Memory Sizing
+
+```go
+// Prevent OOM with MaxBytes
+MaxBytes: availableMemory * 0.7 // Use 70% of available memory
+
+// Or size by expected entries
+MaxBytes: capacity * avgItemSize
+```
+
+### TTL Configuration
+
+```go
+// Match HTTP Cache-Control headers
+DefaultTTL: 5 * time.Minute
+
+// Or per-request TTL
+cache.PutWithTTL(key, value, parseCacheControl(headers))
+```
+
+---
+
+## Limitations & Tradeoffs
+
+### Memory Usage
+- In-memory only (not persistent)
+- Size grows up to `MaxBytes`
+- Use `MaxBytes` to prevent OOM
+
+### TTL Precision
+- Background cleanup runs every `CleanupInterval`
+- Expired items removed on access or cleanup
+- Not millisecond-precise
+
+### Sharding Tradeoffs
+- More shards = better concurrency
+- More shards = slightly more memory
+- Optimal: 2-4x CPU cores
+
+### LRU Granularity
+- In sharded mode, LRU is per-shard
+- `Oldest()` returns oldest from any shard, not global
+- Usually fine for most use cases
+
+---
+
+## Summary
+
+ProxyCache is a production-ready HTTP-aware cache for proxies:
+
+✅ **Fast**: 5-9M ops/sec
+✅ **HTTP-Aware**: TTL, size limits, callbacks
+✅ **Scalable**: Sharding for high concurrency
+✅ **Observable**: Built-in stats tracking
+✅ **Flexible**: Works for L4, L7, rate limiting, sessions, etc.
+
+**Ready to drop into your proxy and handle millions of requests! 🚀**
